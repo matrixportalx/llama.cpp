@@ -324,8 +324,8 @@ class MainActivity : AppCompatActivity() {
                 engine.sendUserPrompt(text)
                     .collect { token ->
                         fullResponse += token
-                        messageAdapter.updateLastAssistantMessage(fullResponse)
-                        messagesRv.scrollToPosition(currentMessages.size - 1)
+                        val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
+                        messagesRv.scrollToPosition(newIndex)
                     }
             } catch (e: Exception) {
                 messageAdapter.updateLastAssistantMessage(
