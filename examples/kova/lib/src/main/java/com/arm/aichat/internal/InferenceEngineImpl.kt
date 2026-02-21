@@ -238,14 +238,8 @@ class InferenceEngineImpl private constructor(
             Log.i(TAG, "User prompt processed. Generating assistant prompt...")
             _state.value = InferenceEngine.State.Generating
             while (!_cancelGeneration) {
-                generateNextToken()?.let { utf8token ->
-                    val cleaned = utf8token
-                        .replace("<|START_RESPONSE|>", "")
-                        .replace("<|END_RESPONSE|>", "")
-                        .replace("<|END_OF_TURN_TOKEN|>", "")
-                        .replace("<|START_OF_TURN_TOKEN|>", "")
-                        .replace("<|CHATBOT_TOKEN|>", "")
-                    if (cleaned.isNotEmpty()) emit(cleaned)
+                generateNextToken()?.let { token ->
+                    if (token.isNotEmpty()) emit(token)
                 } ?: break
             }
             if (_cancelGeneration) {
