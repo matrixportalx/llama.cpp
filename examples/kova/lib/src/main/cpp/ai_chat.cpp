@@ -31,7 +31,12 @@ constexpr int   N_THREADS_HEADROOM      = 2;
 constexpr int   DEFAULT_CONTEXT_SIZE    = 2048;
 constexpr int   OVERFLOW_HEADROOM       = 4;
 constexpr int   BATCH_SIZE              = 512;
-constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
+constexpr float DEFAULT_SAMPLER_TEMP    = 0.8f;
+constexpr float DEFAULT_SAMPLER_TOP_P   = 0.95f;
+constexpr int   DEFAULT_SAMPLER_TOP_K   = 40;
+
+// Runtime-configurable values (set via prepare())
+static int   g_context_size = DEFAULT_CONTEXT_SIZE;
 
 static llama_model                      * g_model;
 static llama_context                    * g_context;
@@ -104,21 +109,35 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     return context;
 }
 
-static common_sampler *new_sampler(float temp) {
+static common_sampler *new_sampler(float temp, float top_p, int top_k) {
     common_params_sampling sparams;
-    sparams.temp = temp;
+    sparams.temp  = temp;
+    sparams.top_p = top_p;
+    sparams.top_k = top_k;
+    LOGi("Sampler: temp=%.2f top_p=%.2f top_k=%d", temp, top_p, top_k);
     return common_sampler_init(g_model, sparams);
 }
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(JNIEnv * /*env*/, jobject /*unused*/) {
-    auto *context = init_context(g_model);
+Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
+        JNIEnv * /*env*/,
+        jobject /*unused*/,
+        jint n_ctx,
+        jfloat temperature,
+        jfloat top_p,
+        jint top_k
+) {
+    g_context_size = n_ctx;
+    LOGi("prepare(): context_size=%d temp=%.2f top_p=%.2f top_k=%d",
+         g_context_size, temperature, top_p, top_k);
+
+    auto *context = init_context(g_model, g_context_size);
     if (!context) { return 1; }
     g_context = context;
     g_batch = llama_batch_init(BATCH_SIZE, 0, 1);
     g_chat_templates = common_chat_templates_init(g_model, "");
-    g_sampler = new_sampler(DEFAULT_SAMPLER_TEMP);
+    g_sampler = new_sampler(temperature, top_p, top_k);
     return 0;
 }
 
@@ -319,7 +338,6 @@ static int decode_tokens_in_batches(
         const llama_tokens &tokens,
         const llama_pos start_pos,
         const bool compute_last_logit = false) {
-    // Process tokens in batches using the global batch
     LOGd("%s: Decode %d tokens starting at position %d", __func__, (int) tokens.size(), start_pos);
     for (int i = 0; i < (int) tokens.size(); i += BATCH_SIZE) {
         const int cur_batch_size = std::min((int) tokens.size() - i, BATCH_SIZE);
@@ -327,7 +345,7 @@ static int decode_tokens_in_batches(
         LOGv("%s: Preparing a batch size of %d starting at: %d", __func__, cur_batch_size, i);
 
         // Shift context if current batch cannot fit into the context
-        if (start_pos + i + cur_batch_size >= DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM) {
+        if (start_pos + i + cur_batch_size >= g_context_size - OVERFLOW_HEADROOM) {
             LOGw("%s: Current batch won't fit into context! Shifting...", __func__);
             shift_context();
         }
@@ -381,7 +399,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     }
 
     // Handle context overflow
-    const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
+    const int max_batch_size = g_context_size - OVERFLOW_HEADROOM;
     if ((int) system_tokens.size() > max_batch_size) {
         LOGe("%s: System prompt too long for context! %d tokens, max: %d",
              __func__, (int) system_tokens.size(), max_batch_size);
@@ -430,7 +448,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
 
     // Ensure user prompt doesn't exceed the context size by truncating if necessary.
     const int user_prompt_size = (int) user_tokens.size();
-    const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
+    const int max_batch_size = g_context_size - OVERFLOW_HEADROOM;
     if (user_prompt_size > max_batch_size) {
         const int skipped_tokens = user_prompt_size - max_batch_size;
         user_tokens.resize(max_batch_size);
@@ -457,16 +475,12 @@ static bool is_valid_utf8(const char *string) {
 
     while (*bytes != 0x00) {
         if ((*bytes & 0x80) == 0x00) {
-            // U+0000 to U+007F
             num = 1;
         } else if ((*bytes & 0xE0) == 0xC0) {
-            // U+0080 to U+07FF
             num = 2;
         } else if ((*bytes & 0xF0) == 0xE0) {
-            // U+0800 to U+FFFF
             num = 3;
         } else if ((*bytes & 0xF8) == 0xF0) {
-            // U+10000 to U+10FFFF
             num = 4;
         } else {
             return false;
@@ -490,7 +504,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         jobject /*unused*/
 ) {
     // Infinite text generation via context shifting
-    if (current_position >= DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM) {
+    if (current_position >= g_context_size - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
         shift_context();
     }
