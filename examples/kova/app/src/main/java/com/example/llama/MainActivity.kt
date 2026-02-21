@@ -822,9 +822,7 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     AlertDialog.Builder(this@MainActivity)
                         .setTitle("Yedekleme Tamamlandı")
-                        .setMessage("${conversations.size} sohbet yedeklendi.
-
-Konum: ${file.absolutePath}")
+                        .setMessage("${conversations.size} sohbet yedeklendi.\n\nKonum: ${file.absolutePath}")
                         .setPositiveButton("Tamam", null)
                         .show()
                 }
