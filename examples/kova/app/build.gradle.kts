@@ -9,7 +9,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.llama.aichat"
+        applicationId = "com.kova.chat"
         minSdk = 33
         targetSdk = 36
         versionCode = 3
