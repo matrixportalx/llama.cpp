@@ -4,11 +4,17 @@
 
     <item
         android:id="@+id/action_change_model"
-        android:title="Model değiştir"
+        android:title="Model Değiştir"
         app:showAsAction="never" />
 
     <item
         android:id="@+id/action_clear_chat"
-        android:title="Sohbeti temizle"
+        android:title="Sohbeti Temizle"
         app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_settings"
+        android:title="⚙️ Ayarlar"
+        app:showAsAction="never" />
+
 </menu>
