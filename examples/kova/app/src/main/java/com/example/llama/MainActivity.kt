@@ -421,7 +421,7 @@ private fun showTemplatePickerDialog(path: String) {
         }
         .setNegativeButton("İptal", null)
         .show()
-}    
+}
     private fun showAddModelDialog() {
         AlertDialog.Builder(this)
             .setTitle("Model Ekle")
