@@ -5,6 +5,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
+import io.noties.markwon.Markwon
 
 data class ChatMessage(
     val content: String,
@@ -16,6 +17,7 @@ class MessageAdapter(
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private val messages = mutableListOf<ChatMessage>()
+    private var markwon: Markwon? = null
 
     companion object {
         private const val VIEW_TYPE_USER = 1
@@ -43,6 +45,10 @@ class MessageAdapter(
         if (messages[position].isUser) VIEW_TYPE_USER else VIEW_TYPE_ASSISTANT
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        // Markwon'u ilk ViewHolder oluşturulduğunda başlat
+        if (markwon == null) {
+            markwon = Markwon.create(parent.context)
+        }
         val inflater = LayoutInflater.from(parent.context)
         return if (viewType == VIEW_TYPE_USER)
             UserMessageViewHolder(inflater.inflate(R.layout.item_message_user, parent, false))
@@ -52,7 +58,17 @@ class MessageAdapter(
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val message = messages[position]
-        holder.itemView.findViewById<TextView>(R.id.msg_content).text = message.content
+        val textView = holder.itemView.findViewById<TextView>(R.id.msg_content)
+
+        if (message.isUser) {
+            // Kullanıcı mesajı: düz metin
+            textView.text = message.content
+        } else {
+            // Asistan mesajı: markdown render
+            markwon?.setMarkdown(textView, message.content)
+                ?: run { textView.text = message.content }
+        }
+
         holder.itemView.setOnLongClickListener {
             onLongClick(message.content)
             true
