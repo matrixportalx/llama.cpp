@@ -216,12 +216,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupMessageList() {
-        messageAdapter = MessageAdapter { msg ->
-            val clip = ClipData.newPlainText("mesaj", msg)
-            (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(clip)
-            Toast.makeText(this, "Panoya kopyalandı", Toast.LENGTH_SHORT).show()
-        }
+        messageAdapter = MessageAdapter(
+            onCopy = { msg ->
+                val clip = ClipData.newPlainText("mesaj", msg)
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(clip)
+                Toast.makeText(this, "Panoya kopyalandı", Toast.LENGTH_SHORT).show()
+            },
+            onEdit = { position, content ->
+                showEditMessageDialog(position, content)
+            },
+            onRegenerate = { _ ->
+                regenerateLastResponse()
+            }
+        )
         messagesRv.layoutManager = LinearLayoutManager(this).also { it.stackFromEnd = true }
         messagesRv.adapter = messageAdapter
     }
@@ -358,7 +366,6 @@ class MainActivity : AppCompatActivity() {
         messagesRv.scrollToPosition(currentMessages.size - 1)
 
         val convId = currentConversationId
-
         lifecycleScope.launch(Dispatchers.IO) {
             db.chatDao().insertMessage(
                 DbMessage(UUID.randomUUID().toString(), convId, "user", text)
@@ -370,55 +377,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        isGenerating = true
-        updateFabIcon()
-        var fullResponse = ""
-
-        // Sistem promptu varsa önce ekle (sadece ilk mesajsa)
-        val promptToSend = if (systemPrompt.isNotEmpty() && currentMessages.size == 1) {
-            "$systemPrompt\n\n$text"
-        } else {
-            text
-        }
-
-        generationJob = lifecycleScope.launch {
-            try {
-                engine.sendUserPrompt(promptToSend)
-                    .collect { token ->
-                        val cleaned = if (selectedTemplate == 1) {
-                            token
-                                .replace("<|START_RESPONSE|>", "")
-                                .replace("<|END_RESPONSE|>", "")
-                                .replace("<|END_OF_TURN_TOKEN|>", "")
-                                .replace("<|START_OF_TURN_TOKEN|>", "")
-                                .replace("<|CHATBOT_TOKEN|>", "")
-                        } else token
-                        fullResponse += cleaned
-                        val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
-                        messagesRv.scrollToPosition(newIndex)
-                    }
-            } catch (e: Exception) {
-                messageAdapter.updateLastAssistantMessage(
-                    if (fullResponse.isEmpty()) "[Hata: ${e.message}]" else fullResponse
-                )
-            } finally {
-                if (currentMessages.isNotEmpty() && !currentMessages.last().isUser) {
-                    currentMessages[currentMessages.size - 1] = ChatMessage(fullResponse, false)
-                } else {
-                    currentMessages.add(ChatMessage(fullResponse, false))
-                }
-                if (fullResponse.isNotEmpty()) {
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        db.chatDao().insertMessage(
-                            DbMessage(UUID.randomUUID().toString(), convId, "assistant", fullResponse)
-                        )
-                        db.chatDao().touchConversation(convId, System.currentTimeMillis())
-                    }
-                }
-                isGenerating = false
-                updateFabIcon()
-            }
-        }
+        sendMessageContent(text)
     }
 
     private fun stopGeneration() {
@@ -778,7 +737,154 @@ class MainActivity : AppCompatActivity() {
             updateToolbarTitle("Yeni Sohbet")
         }
     }
-    // ── Yedekleme / Geri Yükleme ─────────────────────────────────────────────────
+    // ── Düzenleme / Yeniden Oluştur ──────────────────────────────────────────────
+
+    private fun showEditMessageDialog(position: Int, currentContent: String) {
+        if (isGenerating) {
+            Toast.makeText(this, "Yanıt üretilirken düzenleme yapılamaz", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val input = android.widget.EditText(this).apply {
+            setText(currentContent)
+            setSelection(currentContent.length)
+            setPadding(48, 24, 48, 24)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Mesajı Düzenle")
+            .setView(input)
+            .setPositiveButton("Gönder") { _, _ ->
+                val newText = input.text.toString().trim()
+                if (newText.isNotEmpty() && newText != currentContent) {
+                    editAndResend(position, newText)
+                }
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
+    private fun editAndResend(position: Int, newContent: String) {
+        val convId = currentConversationId
+
+        // Listeden bu mesajdan sonraki tüm mesajları kaldır
+        while (currentMessages.size > position) {
+            currentMessages.removeAt(currentMessages.size - 1)
+        }
+        // Düzenlenmiş mesajı yerleştir
+        currentMessages.add(ChatMessage(content = newContent, isUser = true))
+        messageAdapter.submitList(currentMessages.toList())
+
+        // DB'de bu sohbetin mesajlarını temizleyip yeniden yaz
+        lifecycleScope.launch(Dispatchers.IO) {
+            db.chatDao().deleteMessages(convId)
+            currentMessages.forEachIndexed { idx, msg ->
+                db.chatDao().insertMessage(
+                    com.example.llama.data.DbMessage(
+                        id = java.util.UUID.randomUUID().toString(),
+                        conversationId = convId,
+                        role = if (msg.isUser) "user" else "assistant",
+                        content = msg.content,
+                        timestamp = System.currentTimeMillis() + idx
+                    )
+                )
+            }
+        }
+
+        // Modele yeniden gönder
+        sendMessageContent(newContent)
+    }
+
+    private fun regenerateLastResponse() {
+        if (isGenerating) {
+            Toast.makeText(this, "Yanıt üretilirken yeniden oluşturulamaz", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (loadedModelPath == null) {
+            Toast.makeText(this, "Önce bir model yükleyin", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Son asistan mesajını bul ve kaldır
+        if (currentMessages.isNotEmpty() && !currentMessages.last().isUser) {
+            currentMessages.removeAt(currentMessages.size - 1)
+        }
+
+        // Son kullanıcı mesajını bul
+        val lastUserMsg = currentMessages.lastOrNull { it.isUser }?.content ?: return
+
+        messageAdapter.submitList(currentMessages.toList())
+
+        // DB'den son asistan mesajını sil
+        val convId = currentConversationId
+        lifecycleScope.launch(Dispatchers.IO) {
+            val dbMessages = db.chatDao().getMessages(convId)
+            val lastAssistant = dbMessages.lastOrNull { it.role == "assistant" }
+            lastAssistant?.let { msg ->
+                db.chatDao().deleteMessages(convId)
+                dbMessages.filter { it.id != msg.id }.forEach {
+                    db.chatDao().insertMessage(it)
+                }
+            }
+        }
+
+        sendMessageContent(lastUserMsg)
+    }
+
+    /** sendMessage'ın içeriği dışarıdan da çağrılabilsin diye ayrıldı */
+    private fun sendMessageContent(text: String) {
+        if (loadedModelPath == null) {
+            Toast.makeText(this, "Önce bir model yükleyin", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val convId = currentConversationId
+        isGenerating = true
+        updateFabIcon()
+        var fullResponse = ""
+
+        generationJob = lifecycleScope.launch {
+            try {
+                engine.sendUserPrompt(text)
+                    .collect { token ->
+                        val cleaned = if (selectedTemplate == 1) {
+                            token
+                                .replace("<|START_RESPONSE|>", "")
+                                .replace("<|END_RESPONSE|>", "")
+                                .replace("<|END_OF_TURN_TOKEN|>", "")
+                                .replace("<|START_OF_TURN_TOKEN|>", "")
+                                .replace("<|CHATBOT_TOKEN|>", "")
+                        } else token
+                        fullResponse += cleaned
+                        val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
+                        messagesRv.scrollToPosition(newIndex)
+                    }
+            } catch (e: Exception) {
+                messageAdapter.updateLastAssistantMessage(
+                    if (fullResponse.isEmpty()) "[Hata: ${e.message}]" else fullResponse
+                )
+            } finally {
+                if (currentMessages.isNotEmpty() && !currentMessages.last().isUser) {
+                    currentMessages[currentMessages.size - 1] = ChatMessage(fullResponse, false)
+                } else {
+                    currentMessages.add(ChatMessage(fullResponse, false))
+                }
+                if (fullResponse.isNotEmpty()) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        db.chatDao().insertMessage(
+                            com.example.llama.data.DbMessage(
+                                java.util.UUID.randomUUID().toString(), convId, "assistant", fullResponse,
+                                System.currentTimeMillis()
+                            )
+                        )
+                        db.chatDao().touchConversation(convId, System.currentTimeMillis())
+                    }
+                }
+                isGenerating = false
+                updateFabIcon()
+            }
+        }
+    }
+
+        // ── Yedekleme / Geri Yükleme ─────────────────────────────────────────────────
 
     private fun backupChats() {
         lifecycleScope.launch(Dispatchers.IO) {
