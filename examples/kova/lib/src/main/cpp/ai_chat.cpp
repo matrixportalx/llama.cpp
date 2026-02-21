@@ -388,8 +388,13 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     std::string formatted_system_prompt(system_prompt);
     env->ReleaseStringUTFChars(jsystem_prompt, system_prompt);
 
-    // Format system prompt if applicable
-    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    // GGUF içinde gerçekten template var mı kontrol et
+    // was_explicit her zaman false döner çünkü init'e "" geçiyoruz
+    const char* model_tmpl = llama_model_chat_template(g_model, nullptr);
+    const bool has_chat_template = (model_tmpl != nullptr && model_tmpl[0] != '\0');
+    LOGi("%s: has_chat_template=%d template=%s", __func__, has_chat_template,
+         has_chat_template ? model_tmpl : "(none)");
+
     if (has_chat_template) {
         formatted_system_prompt = chat_add_and_format(ROLE_SYSTEM, system_prompt);
     }
@@ -437,8 +442,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     std::string formatted_user_prompt(user_prompt);
     env->ReleaseStringUTFChars(juser_prompt, user_prompt);
 
-    // Format user prompt if applicable
-    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    // GGUF template kontrolü (system prompt ile aynı mantık)
+    const char* model_tmpl_u = llama_model_chat_template(g_model, nullptr);
+    const bool has_chat_template = (model_tmpl_u != nullptr && model_tmpl_u[0] != '\0');
+
     if (has_chat_template) {
         formatted_user_prompt = chat_add_and_format(ROLE_USER, user_prompt);
     }
