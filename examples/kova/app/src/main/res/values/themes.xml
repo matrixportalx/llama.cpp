@@ -2,9 +2,24 @@
 <resources>
 
     <style name="Base.Theme.AiChatSample" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+        <!-- Status bar ve navigation bar renkleri -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+
+        <!-- Uygulama renk paleti — sohbet alanıyla uyumlu koyu tema -->
+        <item name="colorPrimary">#5B5B9F</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#3D3D6B</item>
+        <item name="colorOnPrimaryContainer">#E0E0FF</item>
+        <item name="colorSurface">#1E1E2E</item>
+        <item name="colorOnSurface">#E0E0E0</item>
+        <item name="colorSurfaceVariant">#2A2A3E</item>
+        <item name="colorBackground">#1E1E2E</item>
+        <item name="android:colorBackground">#1E1E2E</item>
+        <item name="android:windowBackground">#1E1E2E</item>
     </style>
 
     <style name="Theme.AiChatSample" parent="Base.Theme.AiChatSample" />
+
 </resources>
