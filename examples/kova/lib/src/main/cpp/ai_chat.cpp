@@ -111,10 +111,13 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
 
 static common_sampler *new_sampler(float temp, float top_p, int top_k) {
     common_params_sampling sparams;
-    sparams.temp  = temp;
-    sparams.top_p = top_p;
-    sparams.top_k = top_k;
-    LOGi("Sampler: temp=%.2f top_p=%.2f top_k=%d", temp, top_p, top_k);
+    sparams.temp           = temp;
+    sparams.top_p          = top_p;
+    sparams.top_k          = top_k;
+    sparams.penalty_repeat = 1.1f;  // Tekrar döngüsünü önler (1.0 = kapalı)
+    sparams.penalty_last_n = 64;    // Son 64 tokena bak
+    LOGi("Sampler: temp=%.2f top_p=%.2f top_k=%d repeat_penalty=%.2f",
+         temp, top_p, top_k, sparams.penalty_repeat);
     return common_sampler_init(g_model, sparams);
 }
 
@@ -462,8 +465,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     }
 
     // Update position
+    // Düzeltme: current_position güncellendikten sonra sadece n_predict eklenir.
+    // Önceki kodda user_prompt_size iki kez ekleniyordu (bug).
     current_position += user_prompt_size;
-    stop_generation_position = current_position + user_prompt_size + n_predict;
+    stop_generation_position = current_position + n_predict;
+    LOGi("%s: current_pos=%d stop_pos=%d n_predict=%d",
+         __func__, current_position, stop_generation_position, n_predict);
     return 0;
 }
 
