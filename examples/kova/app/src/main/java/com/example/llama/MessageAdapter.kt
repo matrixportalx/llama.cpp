@@ -74,15 +74,9 @@ class MessageAdapter(
             markwon?.setMarkdown(textView, message.content)
                 ?: run { textView.text = message.content }
 
-            // Markwon kendi MovementMethod'unu atıyor, metin seçimini kırar.
-            // ArrowKeyMovementMethod hem seçimi hem de tıklamayı destekler.
-            textView.movementMethod = android.text.method.ArrowKeyMovementMethod.getInstance()
+            // Markwon render sonrası textIsSelectable sıfırlanabiliyor, yeniden set et
             textView.setTextIsSelectable(true)
-
-            textView.setOnLongClickListener {
-                onCopy(message.content)
-                true
-            }
+            // onLongClick textView'de OLMAMALI — sistem metin seçimini eziyor
             holder.itemView.findViewById<Button>(R.id.btn_copy).setOnClickListener {
                 onCopy(message.content)
             }
