@@ -35,9 +35,9 @@ class InferenceEngineImpl private constructor(
         private val TAG = InferenceEngineImpl::class.java.simpleName
 
         @Volatile
-        private var instance: InferenceEngine? = null
+        private var instance: InferenceEngineImpl? = null
 
-        fun getInstance(context: Context) =
+        fun getInstance(context: Context): InferenceEngineImpl =
             instance ?: synchronized(this) {
                 val nativeLibDir = context.applicationInfo.nativeLibraryDir
                 require(nativeLibDir.isNotBlank()) { "Expected a valid native library path!" }
