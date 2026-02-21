@@ -432,8 +432,9 @@ class MainActivity : AppCompatActivity() {
             try {
                 Toast.makeText(this@MainActivity, "Model yükleniyor...", Toast.LENGTH_SHORT).show()
 
-                if (engine.state.value is InferenceEngine.State.Error) {
-                    engine.cleanUp()
+                if (engine.state.value is InferenceEngine.State.ModelReady ||
+                   engine.state.value is InferenceEngine.State.Error) {
+                   engine.cleanUp()
                 }
 
                 var waited = 0
