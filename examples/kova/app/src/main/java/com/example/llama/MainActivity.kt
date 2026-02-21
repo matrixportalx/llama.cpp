@@ -44,7 +44,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import android.os.Environment
 import android.net.Uri
-// v3 - markdown + backup/restore
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
+import java.security.SecureRandom
+// v4 - SAF backup + AES-256-GCM encryption
 
 class MainActivity : AppCompatActivity() {
 
@@ -76,15 +82,32 @@ class MainActivity : AppCompatActivity() {
 
     private val currentMessages = mutableListOf<ChatMessage>()
 
+    // SAF: yedek dosyasını kaydetmek için
+    private val backupSaveLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { uri ->
+                pendingBackupUri = uri
+                pendingBackupCallback?.invoke(uri)
+                pendingBackupCallback = null
+            }
+        }
+    }
+
+    // SAF: yedek dosyasını geri yüklemek için
     private val backupRestoreLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
-                restoreFromUri(uri)
+                handleRestoreFile(uri)
             }
         }
     }
+
+    private var pendingBackupUri: Uri? = null
+    private var pendingBackupCallback: ((Uri) -> Unit)? = null
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -884,53 +907,144 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-        // ── Yedekleme / Geri Yükleme ─────────────────────────────────────────────────
+    // ── Yedekleme / Geri Yükleme ─────────────────────────────────────────────────
 
+    /** JSON verisini oluştur */
+    private suspend fun buildBackupJson(): String {
+        val conversations = db.chatDao().getAllConversationsList()
+        val allMessages   = db.chatDao().getAllMessages()
+        val root = JSONObject()
+        root.put("version", 2)
+        root.put("exportedAt", System.currentTimeMillis())
+        val convsArray = JSONArray()
+        for (conv in conversations) {
+            val convObj = JSONObject()
+            convObj.put("id", conv.id)
+            convObj.put("title", conv.title)
+            convObj.put("updatedAt", conv.updatedAt)
+            val msgsArray = JSONArray()
+            allMessages.filter { it.conversationId == conv.id }.forEach { msg ->
+                val msgObj = JSONObject()
+                msgObj.put("id", msg.id)
+                msgObj.put("role", msg.role)
+                msgObj.put("content", msg.content)
+                msgObj.put("timestamp", msg.timestamp)
+                msgsArray.put(msgObj)
+            }
+            convObj.put("messages", msgsArray)
+            convsArray.put(convObj)
+        }
+        root.put("conversations", convsArray)
+        return root.toString(2)
+    }
+
+    /**
+     * AES-256-GCM şifreleme
+     * Format: "KOVA" (4 byte) + salt (16 byte) + iv (12 byte) + şifreli veri
+     */
+    private fun encryptBackup(jsonText: String, password: String): ByteArray {
+        val rng  = SecureRandom()
+        val salt = ByteArray(16).also { rng.nextBytes(it) }
+        val iv   = ByteArray(12).also { rng.nextBytes(it) }
+
+        // PBKDF2 ile anahtar türet (310000 iterasyon — OWASP önerisi)
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val spec    = PBEKeySpec(password.toCharArray(), salt, 310_000, 256)
+        val keyBytes = factory.generateSecret(spec).encoded
+        val key = SecretKeySpec(keyBytes, "AES")
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+        val encrypted = cipher.doFinal(jsonText.toByteArray(Charsets.UTF_8))
+
+        // Başlık: KOVA magic + salt + iv + şifreli veri
+        val magic = "KOVA".toByteArray(Charsets.UTF_8)
+        return magic + salt + iv + encrypted
+    }
+
+    /**
+     * AES-256-GCM çözme
+     */
+    private fun decryptBackup(data: ByteArray, password: String): String {
+        require(data.size > 32) { "Geçersiz yedek dosyası" }
+        val magic = data.slice(0..3).toByteArray()
+        require(String(magic) == "KOVA") { "Bu dosya Kova yedek dosyası değil" }
+
+        val salt      = data.slice(4..19).toByteArray()
+        val iv        = data.slice(20..31).toByteArray()
+        val encrypted = data.slice(32 until data.size).toByteArray()
+
+        val factory  = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val spec     = PBEKeySpec(password.toCharArray(), salt, 310_000, 256)
+        val keyBytes = factory.generateSecret(spec).encoded
+        val key      = SecretKeySpec(keyBytes, "AES")
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+        return String(cipher.doFinal(encrypted), Charsets.UTF_8)
+    }
+
+    /** Dosyanın şifreli Kova yedeği olup olmadığını kontrol et */
+    private fun isEncryptedBackup(data: ByteArray): Boolean {
+        if (data.size < 4) return false
+        return String(data.slice(0..3).toByteArray()) == "KOVA"
+    }
+
+    /** Yedekleme: şifre sor → JSON oluştur → SAF ile kaydet */
     private fun backupChats() {
+        // Şifre dialog
+        val passwordInput = android.widget.EditText(this).apply {
+            hint = "Şifre (boş bırakılırsa şifresiz)"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                        android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setPadding(48, 24, 48, 24)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("💾 Yedekleme")
+            .setMessage("İsteğe bağlı şifre girin. Boş bırakırsanız şifresiz kaydedilir.")
+            .setView(passwordInput)
+            .setPositiveButton("Devam") { _, _ ->
+                val password = passwordInput.text.toString()
+                val isEncrypted = password.isNotEmpty()
+                val ext = if (isEncrypted) "kova" else "json"
+                val fileName = "kova_yedek_${System.currentTimeMillis()}.$ext"
+
+                // SAF ile kayıt konumu seç
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = if (isEncrypted) "application/octet-stream" else "application/json"
+                    putExtra(Intent.EXTRA_TITLE, fileName)
+                }
+                pendingBackupCallback = { uri ->
+                    performBackupToUri(uri, password, isEncrypted)
+                }
+                backupSaveLauncher.launch(intent)
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
+    private fun performBackupToUri(uri: Uri, password: String, encrypt: Boolean) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
+                val jsonText = buildBackupJson()
                 val conversations = db.chatDao().getAllConversationsList()
-                val allMessages   = db.chatDao().getAllMessages()
 
-                // JSON oluştur
-                val root = JSONObject()
-                root.put("version", 1)
-                root.put("exportedAt", System.currentTimeMillis())
-
-                val convsArray = JSONArray()
-                for (conv in conversations) {
-                    val convObj = JSONObject()
-                    convObj.put("id", conv.id)
-                    convObj.put("title", conv.title)
-                    convObj.put("updatedAt", conv.updatedAt)
-
-                    val msgsArray = JSONArray()
-                    allMessages.filter { it.conversationId == conv.id }.forEach { msg ->
-                        val msgObj = JSONObject()
-                        msgObj.put("id", msg.id)
-                        msgObj.put("role", msg.role)
-                        msgObj.put("content", msg.content)
-                        msgObj.put("timestamp", msg.timestamp)
-                        msgsArray.put(msgObj)
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    if (encrypt) {
+                        out.write(encryptBackup(jsonText, password))
+                    } else {
+                        out.write(jsonText.toByteArray(Charsets.UTF_8))
                     }
-                    convObj.put("messages", msgsArray)
-                    convsArray.put(convObj)
-                }
-                root.put("conversations", convsArray)
-
-                // Dosyayı kaydet
-                val fileName = "kova_yedek_${System.currentTimeMillis()}.json"
-                val docsDir = getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-                    ?: filesDir
-                val file = java.io.File(docsDir, fileName)
-                file.writeText(root.toString(2))
+                } ?: throw Exception("Dosya yazılamadı")
 
                 withContext(Dispatchers.Main) {
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Yedekleme Tamamlandı")
-                        .setMessage("${conversations.size} sohbet yedeklendi.\n\nKonum: ${file.absolutePath}")
-                        .setPositiveButton("Tamam", null)
-                        .show()
+                    val encMsg = if (encrypt) " (AES-256 şifreli)" else ""
+                    Toast.makeText(
+                        this@MainActivity,
+                        "${conversations.size} sohbet yedeklendi$encMsg",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -940,16 +1054,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Geri yükleme: dosya seç */
     private fun showRestorePicker() {
         AlertDialog.Builder(this)
-            .setTitle("Geri Yükle")
+            .setTitle("📂 Geri Yükle")
             .setMessage("Mevcut tüm sohbetler silinecek ve yedekten geri yüklenecek. Devam edilsin mi?")
             .setPositiveButton("Devam") { _, _ ->
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "application/json"
-                    // JSON dosyaları bazen farklı MIME type ile gelir
-                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "*/*"))
+                    type = "*/*"
                 }
                 backupRestoreLauncher.launch(intent)
             }
@@ -957,63 +1070,114 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun restoreFromUri(uri: Uri) {
+    /** Seçilen dosyayı işle: şifreli mi değil mi? */
+    private fun handleRestoreFile(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val jsonText = contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                val bytes = contentResolver.openInputStream(uri)?.readBytes()
                     ?: throw Exception("Dosya okunamadı")
 
-                val root = JSONObject(jsonText)
-                val version = root.optInt("version", 1)
-                val convsArray = root.getJSONArray("conversations")
+                if (isEncryptedBackup(bytes)) {
+                    // Şifreli — şifre sor
+                    withContext(Dispatchers.Main) {
+                        val passInput = android.widget.EditText(this@MainActivity).apply {
+                            hint = "Yedekleme şifresi"
+                            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                                        android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                            setPadding(48, 24, 48, 24)
+                        }
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("🔐 Şifreli Yedek")
+                            .setMessage("Bu yedek şifrelenmiş. Şifreyi girin:")
+                            .setView(passInput)
+                            .setPositiveButton("Çöz ve Yükle") { _, _ ->
+                                val pass = passInput.text.toString()
+                                if (pass.isEmpty()) {
+                                    Toast.makeText(this@MainActivity, "Şifre boş olamaz", Toast.LENGTH_SHORT).show()
+                                    return@setPositiveButton
+                                }
+                                lifecycleScope.launch(Dispatchers.IO) {
+                                    try {
+                                        val jsonText = decryptBackup(bytes, pass)
+                                        importJsonBackup(jsonText)
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(
+                                                this@MainActivity,
+                                                "Şifre çözme hatası. Şifre yanlış olabilir.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    }
+                                }
+                            }
+                            .setNegativeButton("İptal", null)
+                            .show()
+                    }
+                } else {
+                    // Şifresiz JSON
+                    val jsonText = bytes.toString(Charsets.UTF_8)
+                    importJsonBackup(jsonText)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Dosya okuma hatası: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
 
-                // Mevcut verileri temizle
-                db.chatDao().deleteAllMessages()
-                db.chatDao().deleteAllConversations()
+    /** JSON yedek verisini DB'ye aktar */
+    private suspend fun importJsonBackup(jsonText: String) {
+        try {
+            val root = JSONObject(jsonText)
+            val convsArray = root.getJSONArray("conversations")
 
-                var convCount = 0
-                var msgCount = 0
+            db.chatDao().deleteAllMessages()
+            db.chatDao().deleteAllConversations()
 
-                for (i in 0 until convsArray.length()) {
-                    val convObj = convsArray.getJSONObject(i)
-                    val conv = com.example.llama.data.Conversation(
-                        id        = convObj.getString("id"),
-                        title     = convObj.getString("title"),
-                        updatedAt = convObj.getLong("updatedAt")
-                    )
-                    db.chatDao().insertConversation(conv)
-                    convCount++
+            var convCount = 0
+            var msgCount  = 0
 
-                    val msgsArray = convObj.getJSONArray("messages")
-                    for (j in 0 until msgsArray.length()) {
-                        val msgObj = msgsArray.getJSONObject(j)
-                        val msg = com.example.llama.data.DbMessage(
+            for (i in 0 until convsArray.length()) {
+                val convObj = convsArray.getJSONObject(i)
+                val conv = com.example.llama.data.Conversation(
+                    id        = convObj.getString("id"),
+                    title     = convObj.getString("title"),
+                    updatedAt = convObj.getLong("updatedAt")
+                )
+                db.chatDao().insertConversation(conv)
+                convCount++
+
+                val msgsArray = convObj.getJSONArray("messages")
+                for (j in 0 until msgsArray.length()) {
+                    val msgObj = msgsArray.getJSONObject(j)
+                    db.chatDao().insertMessage(
+                        com.example.llama.data.DbMessage(
                             id             = msgObj.getString("id"),
                             conversationId = conv.id,
                             role           = msgObj.getString("role"),
                             content        = msgObj.getString("content"),
                             timestamp      = msgObj.getLong("timestamp")
                         )
-                        db.chatDao().insertMessage(msg)
-                        msgCount++
-                    }
+                    )
+                    msgCount++
                 }
+            }
 
-                // Aktif sohbeti sıfırla
-                withContext(Dispatchers.Main) {
-                    currentMessages.clear()
-                    messageAdapter.submitList(emptyList())
-                    lifecycleScope.launch { ensureActiveConversation() }
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Geri Yükleme Tamamlandı")
-                        .setMessage("$convCount sohbet, $msgCount mesaj geri yüklendi.")
-                        .setPositiveButton("Tamam", null)
-                        .show()
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Geri yükleme hatası: ${e.message}", Toast.LENGTH_LONG).show()
-                }
+            withContext(Dispatchers.Main) {
+                currentMessages.clear()
+                messageAdapter.submitList(emptyList())
+                lifecycleScope.launch { ensureActiveConversation() }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("✅ Geri Yükleme Tamamlandı")
+                    .setMessage("$convCount sohbet, $msgCount mesaj geri yüklendi.")
+                    .setPositiveButton("Tamam", null)
+                    .show()
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Geri yükleme hatası: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
