@@ -40,7 +40,11 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
-// v2 - configurable context/sampler/systemprompt
+import org.json.JSONArray
+import org.json.JSONObject
+import android.os.Environment
+import android.net.Uri
+// v3 - markdown + backup/restore
 
 class MainActivity : AppCompatActivity() {
 
@@ -71,6 +75,16 @@ class MainActivity : AppCompatActivity() {
     private var topK: Int = 40
 
     private val currentMessages = mutableListOf<ChatMessage>()
+
+    private val backupRestoreLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { uri ->
+                restoreFromUri(uri)
+            }
+        }
+    }
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -745,6 +759,8 @@ class MainActivity : AppCompatActivity() {
             R.id.action_change_model -> { showModelPickerDialog(); true }
             R.id.action_clear_chat  -> { clearCurrentChat(); true }
             R.id.action_settings    -> { showSettingsDialog(); true }
+            R.id.action_backup      -> { backupChats(); true }
+            R.id.action_restore     -> { showRestorePicker(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -762,4 +778,140 @@ class MainActivity : AppCompatActivity() {
             updateToolbarTitle("Yeni Sohbet")
         }
     }
+    // ── Yedekleme / Geri Yükleme ─────────────────────────────────────────────────
+
+    private fun backupChats() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val conversations = db.chatDao().getAllConversationsList()
+                val allMessages   = db.chatDao().getAllMessages()
+
+                // JSON oluştur
+                val root = JSONObject()
+                root.put("version", 1)
+                root.put("exportedAt", System.currentTimeMillis())
+
+                val convsArray = JSONArray()
+                for (conv in conversations) {
+                    val convObj = JSONObject()
+                    convObj.put("id", conv.id)
+                    convObj.put("title", conv.title)
+                    convObj.put("updatedAt", conv.updatedAt)
+
+                    val msgsArray = JSONArray()
+                    allMessages.filter { it.conversationId == conv.id }.forEach { msg ->
+                        val msgObj = JSONObject()
+                        msgObj.put("id", msg.id)
+                        msgObj.put("role", msg.role)
+                        msgObj.put("content", msg.content)
+                        msgObj.put("timestamp", msg.timestamp)
+                        msgsArray.put(msgObj)
+                    }
+                    convObj.put("messages", msgsArray)
+                    convsArray.put(convObj)
+                }
+                root.put("conversations", convsArray)
+
+                // Dosyayı kaydet
+                val fileName = "kova_yedek_${System.currentTimeMillis()}.json"
+                val docsDir = getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                    ?: filesDir
+                val file = java.io.File(docsDir, fileName)
+                file.writeText(root.toString(2))
+
+                withContext(Dispatchers.Main) {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Yedekleme Tamamlandı")
+                        .setMessage("${conversations.size} sohbet yedeklendi.
+
+Konum: ${file.absolutePath}")
+                        .setPositiveButton("Tamam", null)
+                        .show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Yedekleme hatası: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun showRestorePicker() {
+        AlertDialog.Builder(this)
+            .setTitle("Geri Yükle")
+            .setMessage("Mevcut tüm sohbetler silinecek ve yedekten geri yüklenecek. Devam edilsin mi?")
+            .setPositiveButton("Devam") { _, _ ->
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/json"
+                    // JSON dosyaları bazen farklı MIME type ile gelir
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "*/*"))
+                }
+                backupRestoreLauncher.launch(intent)
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
+    private fun restoreFromUri(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val jsonText = contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                    ?: throw Exception("Dosya okunamadı")
+
+                val root = JSONObject(jsonText)
+                val version = root.optInt("version", 1)
+                val convsArray = root.getJSONArray("conversations")
+
+                // Mevcut verileri temizle
+                db.chatDao().deleteAllMessages()
+                db.chatDao().deleteAllConversations()
+
+                var convCount = 0
+                var msgCount = 0
+
+                for (i in 0 until convsArray.length()) {
+                    val convObj = convsArray.getJSONObject(i)
+                    val conv = com.example.llama.data.Conversation(
+                        id        = convObj.getString("id"),
+                        title     = convObj.getString("title"),
+                        updatedAt = convObj.getLong("updatedAt")
+                    )
+                    db.chatDao().insertConversation(conv)
+                    convCount++
+
+                    val msgsArray = convObj.getJSONArray("messages")
+                    for (j in 0 until msgsArray.length()) {
+                        val msgObj = msgsArray.getJSONObject(j)
+                        val msg = com.example.llama.data.DbMessage(
+                            id             = msgObj.getString("id"),
+                            conversationId = conv.id,
+                            role           = msgObj.getString("role"),
+                            content        = msgObj.getString("content"),
+                            timestamp      = msgObj.getLong("timestamp")
+                        )
+                        db.chatDao().insertMessage(msg)
+                        msgCount++
+                    }
+                }
+
+                // Aktif sohbeti sıfırla
+                withContext(Dispatchers.Main) {
+                    currentMessages.clear()
+                    messageAdapter.submitList(emptyList())
+                    lifecycleScope.launch { ensureActiveConversation() }
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Geri Yükleme Tamamlandı")
+                        .setMessage("$convCount sohbet, $msgCount mesaj geri yüklendi.")
+                        .setPositiveButton("Tamam", null)
+                        .show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Geri yükleme hatası: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
 }
