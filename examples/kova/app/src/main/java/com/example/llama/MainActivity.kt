@@ -37,6 +37,7 @@ import java.util.UUID
 class MainActivity : AppCompatActivity() {
 
     private lateinit var drawerLayout: DrawerLayout
+    private var selectedTemplate: Int = 0
     private lateinit var toolbar: Toolbar
     private lateinit var messagesRv: RecyclerView
     private lateinit var messageInput: EditText
@@ -322,10 +323,18 @@ class MainActivity : AppCompatActivity() {
         generationJob = lifecycleScope.launch {
             try {
                 engine.sendUserPrompt(text)
-                    .collect { token ->
-                        fullResponse += token
-                        val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
-                        messagesRv.scrollToPosition(newIndex)
+            .collect { token ->
+                val cleaned = if (selectedTemplate == 1) {
+                    token
+                        .replace("<|START_RESPONSE|>", "")
+                        .replace("<|END_RESPONSE|>", "")
+                        .replace("<|END_OF_TURN_TOKEN|>", "")
+                        .replace("<|START_OF_TURN_TOKEN|>", "")
+                        .replace("<|CHATBOT_TOKEN|>", "")
+                } else token
+                fullResponse += cleaned
+                val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
+                messagesRv.scrollToPosition(newIndex)
                     }
             } catch (e: Exception) {
                 messageAdapter.updateLastAssistantMessage(
@@ -385,11 +394,35 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Model Seç")
             .setItems(options.toTypedArray()) { _, which ->
                 if (which == options.size - 1) showAddModelDialog()
-                else loadModel(savedModels[which])
+                else showTemplatePickerDialog(savedModels[which])
             }
             .show()
     }
 
+private fun showTemplatePickerDialog(path: String) {
+    val templates = arrayOf(
+        "Otomatik (GGUF'tan)",
+        "Aya / Command-R",
+        "ChatML",
+        "Gemma",
+        "Llama 3"
+    )
+    val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
+    val modelKey = "template_${path.substringAfterLast("/")}"
+    val savedTemplate = prefs.getInt(modelKey, 0)
+
+    AlertDialog.Builder(this)
+        .setTitle("Sohbet Şablonu Seçin")
+        .setSingleChoiceItems(templates, savedTemplate) { dialog, which ->
+            selectedTemplate = which
+            prefs.edit().putInt(modelKey, which).apply()
+            dialog.dismiss()
+            loadModel(path)
+        }
+        .setNegativeButton("İptal", null)
+        .show()
+}
+    
     private fun showAddModelDialog() {
         AlertDialog.Builder(this)
             .setTitle("Model Ekle")
