@@ -64,24 +64,25 @@ class MessageAdapter(
 
         if (holder is UserViewHolder) {
             textView.text = message.content
-
             holder.itemView.findViewById<Button>(R.id.btn_copy).setOnClickListener {
                 onCopy(message.content)
             }
             holder.itemView.findViewById<Button>(R.id.btn_edit).setOnClickListener {
                 onEdit(position, message.content)
             }
-
         } else if (holder is AssistantViewHolder) {
             markwon?.setMarkdown(textView, message.content)
                 ?: run { textView.text = message.content }
 
-            // textIsSelectable + Markwon birlikte çalışsın
+            // Markwon kendi MovementMethod'unu atıyor, metin seçimini kırar.
+            // ArrowKeyMovementMethod hem seçimi hem de tıklamayı destekler.
+            textView.movementMethod = android.text.method.ArrowKeyMovementMethod.getInstance()
+            textView.setTextIsSelectable(true)
+
             textView.setOnLongClickListener {
                 onCopy(message.content)
                 true
             }
-
             holder.itemView.findViewById<Button>(R.id.btn_copy).setOnClickListener {
                 onCopy(message.content)
             }
