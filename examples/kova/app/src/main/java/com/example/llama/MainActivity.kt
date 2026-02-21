@@ -9,8 +9,15 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.ActionBarDrawerToggle
@@ -55,6 +62,13 @@ class MainActivity : AppCompatActivity() {
     private var isGenerating = false
     private var generationJob: Job? = null
 
+    // Ayarlar
+    private var contextSize: Int = 2048
+    private var systemPrompt: String = ""
+    private var temperature: Float = 0.8f
+    private var topP: Float = 0.95f
+    private var topK: Int = 40
+
     private val currentMessages = mutableListOf<ChatMessage>()
 
     private val filePickerLauncher = registerForActivityResult(
@@ -68,7 +82,6 @@ class MainActivity : AppCompatActivity() {
                             Toast.makeText(this@MainActivity, "Dosya kopyalanıyor...", Toast.LENGTH_SHORT).show()
                         }
 
-                        // Dosya adını al
                         val fileName = contentResolver.query(
                             uri, null, null, null, null
                         )?.use { cursor ->
@@ -77,7 +90,6 @@ class MainActivity : AppCompatActivity() {
                             cursor.getString(nameIndex)
                         } ?: "model.gguf"
 
-                        // Cache'e kopyala
                         val destFile = java.io.File(cacheDir, fileName)
                         contentResolver.openInputStream(uri)?.use { input ->
                             destFile.outputStream().use { output ->
@@ -115,6 +127,7 @@ class MainActivity : AppCompatActivity() {
         db = AppDatabase.getInstance(this)
         engine = InferenceEngineImpl.getInstance(this)
 
+        loadSettings()
         bindViews()
         setupToolbar()
         setupDrawer()
@@ -132,6 +145,25 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         engine.destroy()
+    }
+
+    private fun loadSettings() {
+        val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
+        contextSize   = prefs.getInt("context_size", 2048)
+        systemPrompt  = prefs.getString("system_prompt", "") ?: ""
+        temperature   = prefs.getFloat("temperature", 0.8f)
+        topP          = prefs.getFloat("top_p", 0.95f)
+        topK          = prefs.getInt("top_k", 40)
+    }
+
+    private fun saveSettings() {
+        getSharedPreferences("llama_prefs", MODE_PRIVATE).edit()
+            .putInt("context_size", contextSize)
+            .putString("system_prompt", systemPrompt)
+            .putFloat("temperature", temperature)
+            .putFloat("top_p", topP)
+            .putInt("top_k", topK)
+            .apply()
     }
 
     private fun bindViews() {
@@ -320,21 +352,28 @@ class MainActivity : AppCompatActivity() {
         updateFabIcon()
         var fullResponse = ""
 
+        // Sistem promptu varsa önce ekle (sadece ilk mesajsa)
+        val promptToSend = if (systemPrompt.isNotEmpty() && currentMessages.size == 1) {
+            "$systemPrompt\n\n$text"
+        } else {
+            text
+        }
+
         generationJob = lifecycleScope.launch {
             try {
-                engine.sendUserPrompt(text)
-            .collect { token ->
-                val cleaned = if (selectedTemplate == 1) {
-                    token
-                        .replace("<|START_RESPONSE|>", "")
-                        .replace("<|END_RESPONSE|>", "")
-                        .replace("<|END_OF_TURN_TOKEN|>", "")
-                        .replace("<|START_OF_TURN_TOKEN|>", "")
-                        .replace("<|CHATBOT_TOKEN|>", "")
-                } else token
-                fullResponse += cleaned
-                val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
-                messagesRv.scrollToPosition(newIndex)
+                engine.sendUserPrompt(promptToSend)
+                    .collect { token ->
+                        val cleaned = if (selectedTemplate == 1) {
+                            token
+                                .replace("<|START_RESPONSE|>", "")
+                                .replace("<|END_RESPONSE|>", "")
+                                .replace("<|END_OF_TURN_TOKEN|>", "")
+                                .replace("<|START_OF_TURN_TOKEN|>", "")
+                                .replace("<|CHATBOT_TOKEN|>", "")
+                        } else token
+                        fullResponse += cleaned
+                        val newIndex = messageAdapter.updateLastAssistantMessage(fullResponse)
+                        messagesRv.scrollToPosition(newIndex)
                     }
             } catch (e: Exception) {
                 messageAdapter.updateLastAssistantMessage(
@@ -383,6 +422,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // Model listesi: her modele tıklayınca "Yükle / Kaldır / İptal" sorar
     private fun showModelPickerDialog() {
         val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
         val savedModels = prefs.getStringSet("saved_models", mutableSetOf())!!.toMutableList()
@@ -393,35 +433,82 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Model Seç")
             .setItems(options.toTypedArray()) { _, which ->
-                if (which == options.size - 1) showAddModelDialog()
-                else showTemplatePickerDialog(savedModels[which])
+                if (which == options.size - 1) {
+                    showAddModelDialog()
+                } else {
+                    showModelActionDialog(savedModels[which])
+                }
             }
             .show()
     }
 
-private fun showTemplatePickerDialog(path: String) {
-    val templates = arrayOf(
-        "Otomatik (GGUF'tan)",
-        "Aya / Command-R",
-        "ChatML",
-        "Gemma",
-        "Llama 3"
-    )
-    val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
-    val modelKey = "template_${path.substringAfterLast("/")}"
-    val savedTemplate = prefs.getInt(modelKey, 0)
+    // Modele tıklandığında: Yükle / Kaldır / İptal
+    private fun showModelActionDialog(path: String) {
+        val name = path.substringAfterLast("/")
+        AlertDialog.Builder(this)
+            .setTitle(name)
+            .setItems(arrayOf("Yükle", "Kaldır")) { _, which ->
+                when (which) {
+                    0 -> showTemplatePickerDialog(path)
+                    1 -> confirmRemoveModel(path)
+                }
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
 
-    AlertDialog.Builder(this)
-        .setTitle("Sohbet Şablonu Seçin")
-        .setSingleChoiceItems(templates, savedTemplate) { dialog, which ->
-            selectedTemplate = which
-            prefs.edit().putInt(modelKey, which).apply()
-            dialog.dismiss()
-            loadModel(path)
-        }
-        .setNegativeButton("İptal", null)
-        .show()
-}
+    // Modeli listeden ve cache'den kaldır
+    private fun confirmRemoveModel(path: String) {
+        val name = path.substringAfterLast("/")
+        AlertDialog.Builder(this)
+            .setTitle("Modeli Kaldır")
+            .setMessage("\"$name\" uygulamadan kaldırılsın mı? Dosya silinecek.")
+            .setPositiveButton("Kaldır") { _, _ ->
+                // Aktif model mi kontrol et
+                if (loadedModelPath == path) {
+                    Toast.makeText(this, "Önce başka bir model yükleyin veya modeli değiştirin.", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
+                val models = prefs.getStringSet("saved_models", mutableSetOf())!!.toMutableSet()
+                models.remove(path)
+                prefs.edit().putStringSet("saved_models", models).apply()
+
+                // Cache dosyasıysa fiziksel olarak sil
+                val file = java.io.File(path)
+                if (file.exists() && file.absolutePath.startsWith(cacheDir.absolutePath)) {
+                    file.delete()
+                }
+                Toast.makeText(this, "\"$name\" kaldırıldı", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
+    private fun showTemplatePickerDialog(path: String) {
+        val templates = arrayOf(
+            "Otomatik (GGUF'tan)",
+            "Aya / Command-R",
+            "ChatML",
+            "Gemma",
+            "Llama 3"
+        )
+        val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
+        val modelKey = "template_${path.substringAfterLast("/")}"
+        val savedTemplate = prefs.getInt(modelKey, 0)
+
+        AlertDialog.Builder(this)
+            .setTitle("Sohbet Şablonu Seçin")
+            .setSingleChoiceItems(templates, savedTemplate) { dialog, which ->
+                selectedTemplate = which
+                prefs.edit().putInt(modelKey, which).apply()
+                dialog.dismiss()
+                loadModel(path)
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
     private fun showAddModelDialog() {
         AlertDialog.Builder(this)
             .setTitle("Model Ekle")
@@ -459,14 +546,145 @@ private fun showTemplatePickerDialog(path: String) {
             .show()
     }
 
+    // ─── AYARLAR DİALOGU ────────────────────────────────────────────────────────
+
+    private fun showSettingsDialog() {
+        val ctx = this
+        val dp = resources.displayMetrics.density
+
+        // Ana scroll + layout
+        val scrollView = ScrollView(ctx)
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (16 * dp).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        scrollView.addView(layout)
+
+        fun sectionTitle(text: String) = TextView(ctx).apply {
+            this.text = text
+            textSize = 14f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (12 * dp).toInt(); bottomMargin = (4 * dp).toInt() }
+            layoutParams = lp
+        }
+
+        // ── Context Window ──────────────────────────────────────────────────────
+        layout.addView(sectionTitle("Context Window (token)"))
+
+        val ctxGroup = RadioGroup(ctx).apply {
+            orientation = RadioGroup.HORIZONTAL
+        }
+        val ctxOptions = listOf(2048, 4096, 8192)
+        val ctxRadios = ctxOptions.map { size ->
+            RadioButton(ctx).apply {
+                text = size.toString()
+                id = View.generateViewId()
+                isChecked = (size == contextSize)
+            }
+        }
+        ctxRadios.forEach { ctxGroup.addView(it) }
+        layout.addView(ctxGroup)
+
+        // ── Sistem Prompt ───────────────────────────────────────────────────────
+        layout.addView(sectionTitle("Sistem Prompt"))
+
+        val systemPromptInput = EditText(ctx).apply {
+            hint = "Örn: Sen yardımcı bir asistansın."
+            setText(systemPrompt)
+            minLines = 3
+            maxLines = 6
+            gravity = android.view.Gravity.TOP
+        }
+        layout.addView(systemPromptInput)
+
+        // ── Temperature ─────────────────────────────────────────────────────────
+        layout.addView(sectionTitle("Temperature: %.2f".format(temperature)))
+        val tempLabel = layout.getChildAt(layout.childCount - 1) as TextView
+
+        val tempBar = SeekBar(ctx).apply {
+            max = 200  // 0.00 – 2.00, adım 0.01
+            progress = (temperature * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    tempLabel.text = "Temperature: %.2f".format(p / 100f)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        layout.addView(tempBar)
+
+        // ── Top-P ───────────────────────────────────────────────────────────────
+        layout.addView(sectionTitle("Top-P: %.2f".format(topP)))
+        val topPLabel = layout.getChildAt(layout.childCount - 1) as TextView
+
+        val topPBar = SeekBar(ctx).apply {
+            max = 100  // 0.00 – 1.00
+            progress = (topP * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    topPLabel.text = "Top-P: %.2f".format(p / 100f)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        layout.addView(topPBar)
+
+        // ── Top-K ───────────────────────────────────────────────────────────────
+        layout.addView(sectionTitle("Top-K: $topK"))
+        val topKLabel = layout.getChildAt(layout.childCount - 1) as TextView
+
+        val topKBar = SeekBar(ctx).apply {
+            max = 200  // 1 – 200
+            progress = topK
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    val v = maxOf(1, p)
+                    topKLabel.text = "Top-K: $v"
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        layout.addView(topKBar)
+
+        // ── Dialog ──────────────────────────────────────────────────────────────
+        AlertDialog.Builder(this)
+            .setTitle("⚙️ Ayarlar")
+            .setView(scrollView)
+            .setPositiveButton("Kaydet") { _, _ ->
+                // Seçilen context size
+                val checkedId = ctxGroup.checkedRadioButtonId
+                if (checkedId != -1) {
+                    val idx = ctxRadios.indexOfFirst { it.id == checkedId }
+                    if (idx >= 0) contextSize = ctxOptions[idx]
+                }
+                systemPrompt = systemPromptInput.text.toString().trim()
+                temperature = tempBar.progress / 100f
+                topP = topPBar.progress / 100f
+                topK = maxOf(1, topKBar.progress)
+                saveSettings()
+                Toast.makeText(this, "Ayarlar kaydedildi", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
+    // ── Model yükleme ────────────────────────────────────────────────────────────
+
     private fun loadModel(path: String) {
         lifecycleScope.launch {
             try {
                 Toast.makeText(this@MainActivity, "Model yükleniyor...", Toast.LENGTH_SHORT).show()
 
                 if (engine.state.value is InferenceEngine.State.ModelReady ||
-                   engine.state.value is InferenceEngine.State.Error) {
-                   engine.cleanUp()
+                    engine.state.value is InferenceEngine.State.Error) {
+                    engine.cleanUp()
                 }
 
                 var waited = 0
@@ -493,6 +711,8 @@ private fun showTemplatePickerDialog(path: String) {
         }
     }
 
+    // ── Menü ─────────────────────────────────────────────────────────────────────
+
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
         return true
@@ -502,6 +722,7 @@ private fun showTemplatePickerDialog(path: String) {
         return when (item.itemId) {
             R.id.action_change_model -> { showModelPickerDialog(); true }
             R.id.action_clear_chat  -> { clearCurrentChat(); true }
+            R.id.action_settings    -> { showSettingsDialog(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
