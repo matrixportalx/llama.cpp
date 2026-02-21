@@ -28,7 +28,7 @@ class MessageAdapter(
         notifyDataSetChanged()
     }
 
-    fun updateLastAssistantMessage(text: String) {
+    fun updateLastAssistantMessage(text: String): Int {
         if (messages.isNotEmpty() && !messages.last().isUser) {
             messages[messages.size - 1] = ChatMessage(content = text, isUser = false)
             notifyItemChanged(messages.size - 1)
@@ -36,6 +36,7 @@ class MessageAdapter(
             messages.add(ChatMessage(content = text, isUser = false))
             notifyItemInserted(messages.size - 1)
         }
+        return messages.size - 1
     }
 
     override fun getItemViewType(position: Int) =
