@@ -543,6 +543,9 @@ class MainActivity : AppCompatActivity() {
             "Aya / Command-R",
             "ChatML",
             "Gemma",
+            "Gemma3",
+            "Gemma 3",
+            "Gemma3n",
             "Llama 3"
         )
         val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
