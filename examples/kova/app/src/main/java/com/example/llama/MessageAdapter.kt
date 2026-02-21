@@ -3,6 +3,7 @@ package com.example.llama
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import io.noties.markwon.Markwon
@@ -13,7 +14,9 @@ data class ChatMessage(
 )
 
 class MessageAdapter(
-    private val onLongClick: (String) -> Unit
+    private val onCopy: (String) -> Unit,
+    private val onEdit: (Int, String) -> Unit,
+    private val onRegenerate: (Int) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private val messages = mutableListOf<ChatMessage>()
@@ -45,43 +48,51 @@ class MessageAdapter(
         if (messages[position].isUser) VIEW_TYPE_USER else VIEW_TYPE_ASSISTANT
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
-        // Markwon'u ilk ViewHolder oluşturulduğunda başlat
         if (markwon == null) {
             markwon = Markwon.create(parent.context)
         }
         val inflater = LayoutInflater.from(parent.context)
         return if (viewType == VIEW_TYPE_USER)
-            UserMessageViewHolder(inflater.inflate(R.layout.item_message_user, parent, false))
+            UserViewHolder(inflater.inflate(R.layout.item_message_user, parent, false))
         else
-            AssistantMessageViewHolder(inflater.inflate(R.layout.item_message_assistant, parent, false))
+            AssistantViewHolder(inflater.inflate(R.layout.item_message_assistant, parent, false))
     }
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val message = messages[position]
         val textView = holder.itemView.findViewById<TextView>(R.id.msg_content)
 
-        if (message.isUser) {
-            // Kullanıcı mesajı: düz metin
+        if (holder is UserViewHolder) {
             textView.text = message.content
-        } else {
-            // Asistan mesajı: markdown render
+
+            holder.itemView.findViewById<Button>(R.id.btn_copy).setOnClickListener {
+                onCopy(message.content)
+            }
+            holder.itemView.findViewById<Button>(R.id.btn_edit).setOnClickListener {
+                onEdit(position, message.content)
+            }
+
+        } else if (holder is AssistantViewHolder) {
             markwon?.setMarkdown(textView, message.content)
                 ?: run { textView.text = message.content }
-            // Markwon MovementMethod atayabilir, bu yüzden textView'e de ekle
+
+            // textIsSelectable + Markwon birlikte çalışsın
             textView.setOnLongClickListener {
-                onLongClick(message.content)
+                onCopy(message.content)
                 true
             }
-        }
 
-        holder.itemView.setOnLongClickListener {
-            onLongClick(message.content)
-            true
+            holder.itemView.findViewById<Button>(R.id.btn_copy).setOnClickListener {
+                onCopy(message.content)
+            }
+            holder.itemView.findViewById<Button>(R.id.btn_regenerate).setOnClickListener {
+                onRegenerate(position)
+            }
         }
     }
 
     override fun getItemCount() = messages.size
 
-    class UserMessageViewHolder(view: View) : RecyclerView.ViewHolder(view)
-    class AssistantMessageViewHolder(view: View) : RecyclerView.ViewHolder(view)
+    class UserViewHolder(view: View) : RecyclerView.ViewHolder(view)
+    class AssistantViewHolder(view: View) : RecyclerView.ViewHolder(view)
 }
