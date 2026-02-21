@@ -67,6 +67,11 @@ class MessageAdapter(
             // Asistan mesajı: markdown render
             markwon?.setMarkdown(textView, message.content)
                 ?: run { textView.text = message.content }
+            // Markwon MovementMethod atayabilir, bu yüzden textView'e de ekle
+            textView.setOnLongClickListener {
+                onLongClick(message.content)
+                true
+            }
         }
 
         holder.itemView.setOnLongClickListener {
