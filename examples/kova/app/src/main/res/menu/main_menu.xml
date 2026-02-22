@@ -27,4 +27,9 @@
         android:title="📂 Yedekten Geri Yükle"
         app:showAsAction="never" />
 
+    <item
+        android:id="@+id/action_logs"
+        android:title="🔍 Logları Göster"
+        app:showAsAction="never" />
+
 </menu>
