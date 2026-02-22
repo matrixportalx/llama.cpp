@@ -1216,11 +1216,9 @@ class MainActivity : AppCompatActivity() {
                         line.contains("KovaForeground", ignoreCase = true)
                     }
                     .takeLast(150)
-                    .joinToString("
-")
+                    .joinToString("\n")
 
-                val display = if (filtered.isBlank()) raw.lines().takeLast(100).joinToString("
-")
+                val display = if (filtered.isBlank()) raw.lines().takeLast(100).joinToString("\n")
                               else filtered
 
                 withContext(Dispatchers.Main) {
