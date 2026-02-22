@@ -542,8 +542,7 @@ class MainActivity : AppCompatActivity() {
             "Otomatik (GGUF'tan)",
             "Aya / Command-R",
             "ChatML",
-            "lfm2",
-            "Gemma3",
+            "Gemma",
             "Llama 3"
         )
         val prefs = getSharedPreferences("llama_prefs", MODE_PRIVATE)
@@ -789,6 +788,7 @@ class MainActivity : AppCompatActivity() {
             R.id.action_settings    -> { showSettingsDialog(); true }
             R.id.action_backup      -> { backupChats(); true }
             R.id.action_restore     -> { showRestorePicker(); true }
+            R.id.action_logs        -> { showLogsDialog(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -1190,6 +1190,67 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, "Dosya okuma hatası: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    // ── Uygulama Logları ─────────────────────────────────────────────────────────
+
+    private fun showLogsDialog() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // Sadece bu uygulamanın PID'ine ait logları al
+                val pid = android.os.Process.myPid()
+                val process = Runtime.getRuntime().exec(
+                    arrayOf("logcat", "-d", "-v", "brief", "--pid=$pid", "*:D")
+                )
+                val raw = process.inputStream.bufferedReader().readText()
+                process.destroy()
+
+                // ai_chat ve InferenceEngine satırlarını filtrele
+                val filtered = raw.lines()
+                    .filter { line ->
+                        line.contains("ai_chat", ignoreCase = true) ||
+                        line.contains("InferenceEngine", ignoreCase = true) ||
+                        line.contains("KovaForeground", ignoreCase = true)
+                    }
+                    .takeLast(150)
+                    .joinToString("
+")
+
+                val display = if (filtered.isBlank()) raw.lines().takeLast(100).joinToString("
+")
+                              else filtered
+
+                withContext(Dispatchers.Main) {
+                    val tv = android.widget.TextView(this@MainActivity).apply {
+                        text = display.ifBlank { "Log bulunamadı." }
+                        textSize = 10f
+                        setTextIsSelectable(true)
+                        typeface = android.graphics.Typeface.MONOSPACE
+                        val pad = (8 * resources.displayMetrics.density).toInt()
+                        setPadding(pad, pad, pad, pad)
+                    }
+                    val scroll = android.widget.ScrollView(this@MainActivity).apply {
+                        addView(tv)
+                        post { fullScroll(android.widget.ScrollView.FOCUS_DOWN) }
+                    }
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("🔍 Loglar (son 150 satır)")
+                        .setView(scroll)
+                        .setPositiveButton("Kapat", null)
+                        .setNeutralButton("Kopyala") { _, _ ->
+                            val clip = ClipData.newPlainText("log", display)
+                            (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                                .setPrimaryClip(clip)
+                            Toast.makeText(this@MainActivity, "Loglar kopyalandı", Toast.LENGTH_SHORT).show()
+                        }
+                        .show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Log okunamadı: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
