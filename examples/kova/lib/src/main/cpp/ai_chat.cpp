@@ -400,8 +400,11 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     }
 
     // Tokenize system prompt
+    // add_special=false: template zaten BOS içeriyor, çift BOS olmasın
+    // parse_special=true: <|END_OF_TURN_TOKEN|> gibi stringleri token ID'ye çevir
     const auto system_tokens = common_tokenize(g_context, formatted_system_prompt,
-                                               has_chat_template, has_chat_template);
+                                               /* add_special= */ false,
+                                               /* parse_special= */ true);
     for (auto id: system_tokens) {
         LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
     }
@@ -451,7 +454,11 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     }
 
     // Decode formatted user prompts
-    auto user_tokens = common_tokenize(g_context, formatted_user_prompt, has_chat_template, has_chat_template);
+    // add_special=false: template zaten BOS/EOS içeriyor
+    // parse_special=true: özel tokenleri düzgün tokenize et
+    auto user_tokens = common_tokenize(g_context, formatted_user_prompt,
+                                       /* add_special= */ false,
+                                       /* parse_special= */ true);
     for (auto id: user_tokens) {
         LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
     }
@@ -544,7 +551,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Update position
     current_position++;
 
-    // Stop if next token is EOG
+    // Stop if next token is EOG (vocab-based check)
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
         LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
         chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
@@ -553,6 +560,24 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // If not EOG, convert to text
     auto new_token_chars = common_token_to_piece(g_context, new_token_id);
+
+    // Bazı modellerde EOS tokeni metin olarak gelir, vocab check yakalayamaz.
+    // Aya/Command-R: <|END_OF_TURN_TOKEN|>, Gemma3: <end_of_turn>, ChatML: <|im_end|>
+    static const std::vector<std::string> TEXT_EOS_TOKENS = {
+        "<|END_OF_TURN_TOKEN|>",
+        "<end_of_turn>",
+        "<|im_end|>",
+        "<|eot_id|>",
+        "</s>",
+    };
+    for (const auto& eos_str : TEXT_EOS_TOKENS) {
+        if (new_token_chars == eos_str || cached_token_chars + new_token_chars == eos_str) {
+            LOGd("id: %d,\tTEXT EOS token detected: `%s`\nSTOP.", new_token_id, new_token_chars.c_str());
+            chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
+            cached_token_chars.clear();
+            return nullptr;
+        }
+    }
     cached_token_chars += new_token_chars;
 
     // Create and return a valid UTF-8 Java string
