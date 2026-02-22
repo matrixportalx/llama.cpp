@@ -114,8 +114,8 @@ static common_sampler *new_sampler(float temp, float top_p, int top_k) {
     sparams.temp           = temp;
     sparams.top_p          = top_p;
     sparams.top_k          = top_k;
-    sparams.penalty_repeat = 1.1f;  // Tekrar döngüsünü önler (1.0 = kapalı)
-    sparams.penalty_last_n = 64;    // Son 64 tokena bak
+    sparams.penalty_repeat = 1.1f;
+    sparams.penalty_last_n = 64;
     LOGi("Sampler: temp=%.2f top_p=%.2f top_k=%d repeat_penalty=%.2f",
          temp, top_p, top_k, sparams.penalty_repeat);
     return common_sampler_init(g_model, sparams);
@@ -388,23 +388,15 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     std::string formatted_system_prompt(system_prompt);
     env->ReleaseStringUTFChars(jsystem_prompt, system_prompt);
 
-    // GGUF içinde gerçekten template var mı kontrol et
-    // was_explicit her zaman false döner çünkü init'e "" geçiyoruz
-    const char* model_tmpl = llama_model_chat_template(g_model, nullptr);
-    const bool has_chat_template = (model_tmpl != nullptr && model_tmpl[0] != '\0');
-    LOGi("%s: has_chat_template=%d template=%s", __func__, has_chat_template,
-         has_chat_template ? model_tmpl : "(none)");
-
+    // Format system prompt if applicable
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
     if (has_chat_template) {
         formatted_system_prompt = chat_add_and_format(ROLE_SYSTEM, system_prompt);
     }
 
     // Tokenize system prompt
-    // add_special=false: template zaten BOS içeriyor, çift BOS olmasın
-    // parse_special=true: <|END_OF_TURN_TOKEN|> gibi stringleri token ID'ye çevir
     const auto system_tokens = common_tokenize(g_context, formatted_system_prompt,
-                                               /* add_special= */ false,
-                                               /* parse_special= */ true);
+                                               has_chat_template, has_chat_template);
     for (auto id: system_tokens) {
         LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
     }
@@ -445,20 +437,14 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     std::string formatted_user_prompt(user_prompt);
     env->ReleaseStringUTFChars(juser_prompt, user_prompt);
 
-    // GGUF template kontrolü (system prompt ile aynı mantık)
-    const char* model_tmpl_u = llama_model_chat_template(g_model, nullptr);
-    const bool has_chat_template = (model_tmpl_u != nullptr && model_tmpl_u[0] != '\0');
-
+    // Format user prompt if applicable
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
     if (has_chat_template) {
         formatted_user_prompt = chat_add_and_format(ROLE_USER, user_prompt);
     }
 
     // Decode formatted user prompts
-    // add_special=false: template zaten BOS/EOS içeriyor
-    // parse_special=true: özel tokenleri düzgün tokenize et
-    auto user_tokens = common_tokenize(g_context, formatted_user_prompt,
-                                       /* add_special= */ false,
-                                       /* parse_special= */ true);
+    auto user_tokens = common_tokenize(g_context, formatted_user_prompt, has_chat_template, has_chat_template);
     for (auto id: user_tokens) {
         LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
     }
@@ -479,12 +465,9 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     }
 
     // Update position
-    // Düzeltme: current_position güncellendikten sonra sadece n_predict eklenir.
-    // Önceki kodda user_prompt_size iki kez ekleniyordu (bug).
+    // Fix: current_position zaten user_prompt_size içeriyor, tekrar ekleme
     current_position += user_prompt_size;
     stop_generation_position = current_position + n_predict;
-    LOGi("%s: current_pos=%d stop_pos=%d n_predict=%d",
-         __func__, current_position, stop_generation_position, n_predict);
     return 0;
 }
 
@@ -551,7 +534,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Update position
     current_position++;
 
-    // Stop if next token is EOG (vocab-based check)
+    // Stop if next token is EOG
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
         LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
         chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
@@ -560,24 +543,6 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // If not EOG, convert to text
     auto new_token_chars = common_token_to_piece(g_context, new_token_id);
-
-    // Bazı modellerde EOS tokeni metin olarak gelir, vocab check yakalayamaz.
-    // Aya/Command-R: <|END_OF_TURN_TOKEN|>, Gemma3: <end_of_turn>, ChatML: <|im_end|>
-    static const std::vector<std::string> TEXT_EOS_TOKENS = {
-        "<|END_OF_TURN_TOKEN|>",
-        "<end_of_turn>",
-        "<|im_end|>",
-        "<|eot_id|>",
-        "</s>",
-    };
-    for (const auto& eos_str : TEXT_EOS_TOKENS) {
-        if (new_token_chars == eos_str || cached_token_chars + new_token_chars == eos_str) {
-            LOGd("id: %d,\tTEXT EOS token detected: `%s`\nSTOP.", new_token_id, new_token_chars.c_str());
-            chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
-            cached_token_chars.clear();
-            return nullptr;
-        }
-    }
     cached_token_chars += new_token_chars;
 
     // Create and return a valid UTF-8 Java string
