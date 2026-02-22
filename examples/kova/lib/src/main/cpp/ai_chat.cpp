@@ -554,21 +554,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Stop if next token is EOG (vocab-based check)
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
         LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
-        // FIX 2: Ham içeriği direkt ekle, chat_add_and_format() çağırma.
-        // chat_add_and_format() formatlı metni geçmişe koyar, bir sonraki turda
-        // çift-format sorununa yol açar.
-        common_chat_msg assistant_msg;
-        assistant_msg.role    = ROLE_ASSISTANT;
-        assistant_msg.content = assistant_ss.str();
-        chat_msgs.push_back(assistant_msg);
+        chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
         return nullptr;
     }
 
-    // FIX 1: special=true ile çağır.
-    // special=false (default) ile EOS tokenleri boş string "" döndürür,
-    // TEXT_EOS kontrolü hiç eşleşmez ve döngü oluşur.
-    // special=true ile "<|END_OF_TURN_TOKEN|>", "<end_of_turn>" vb. düzgün döner.
-    auto new_token_chars = common_token_to_piece(g_context, new_token_id, /* special= */ true);
+    // If not EOG, convert to text
+    auto new_token_chars = common_token_to_piece(g_context, new_token_id);
 
     // Bazı modellerde EOS tokeni metin olarak gelir, vocab check yakalayamaz.
     // Aya/Command-R: <|END_OF_TURN_TOKEN|>, Gemma3: <end_of_turn>, ChatML: <|im_end|>
@@ -582,11 +573,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     for (const auto& eos_str : TEXT_EOS_TOKENS) {
         if (new_token_chars == eos_str || cached_token_chars + new_token_chars == eos_str) {
             LOGd("id: %d,\tTEXT EOS token detected: `%s`\nSTOP.", new_token_id, new_token_chars.c_str());
-            // FIX 2: Ham içeriği direkt ekle (yukarıdaki EOG bloğuyla aynı mantık)
-            common_chat_msg assistant_msg;
-            assistant_msg.role    = ROLE_ASSISTANT;
-            assistant_msg.content = assistant_ss.str();
-            chat_msgs.push_back(assistant_msg);
+            chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
             cached_token_chars.clear();
             return nullptr;
         }
